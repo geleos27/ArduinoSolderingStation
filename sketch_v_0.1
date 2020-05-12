@@ -1,0 +1,1147 @@
+Переработанная версия скетча от Dmitrysh
+подробная информация на форуме Амперки: goo.gl/ijbJho
+
+
+//Параметры в структуре ИЗМЕНЕНЫ!
+//Рампа для низа, Верха и коррекции мощности по отклонению температуры платы.
+//Преднагрев 5 секунд 3% мощности (можно изменить в переменной)
+//управление включением/выключением пайки и переключением профилей с РС
+//сохранение и загрузка профилей с/на диск PC
+//не используется экран, только ПК
+//ПИД по измерению dT
+
+
+//добавлен 3 пид
+//добавлено чтение 3й термопары
+
+//Шаги ВИ,НИ, Платы не привязаны друг к другу по времени. Шаг для каждого может быть произвольной длинны до 250 секунд. Максимум 29 шагов (30 точек графика)
+
+//Словарь команд:
+
+
+// E - прервать текущее задание = кнопка STOP !!! Работает только при подключенном ZCC !!!
+// S - Начать выполнение профиля
+// N + профиль - Начать прием профиля
+// P - загружает профиль из EEPROM в оперативную память
+// U - следующий профиль
+// D - предыдущий профиль
+// J - переход к соответствующей точке профиля если плата горячая. повторная отправка ВКЛ \ ВЫКЛ.
+// H - Включить HOLD - приостанавливаем выполнение профиля и переходим на удержание температуры платы. повторная отправка ВКЛ \ ВЫКЛ.
+
+
+// TODO 
+//1.Вывод всех ошибок в Буфер данных. 2 потока: Статусы, Информация для графиков.
+//2.Отправка данных на пк: во время выполнения профиля: температура, мощности, время по графику, время факт. Включена ли пауза. Синхронизация данных о профиле в начале программы
+//3.Получение данных с ПК: Профиль, команды вкл\выкл\пауза, переключение профилей.
+//4.Режим удержания температуры платы на хх градусов
+//5.режим удержания температуры нагревателя на хх градусов
+//6. Автотюнинг ПИД
+//7. Исправить Перерегулирование ПИД платы на этапе Warmup
+//8. Исправить активацию автопаузы на этапе остывания (последний шаг)
+//9. Добавить обработку кнопок, вывод на экран
+
+
+#include <EEPROM.h>
+
+//Секция ПИД----------------------------------------------
+float integra1, integra2, integra3;  //интегральные составляющие ВИ и НИ и платы
+float e1,p1,d1,e2,p2,d2,e3,p3,d3;   //ошибка регулирования, П-составляющая, Д-составляющая для ВИ, НИ и платы соответственно
+#define i_min 0.0                   //минимум И составляющей
+#define i_max 100.0                 //максимум И составляющей
+
+
+int SetPoint_Top;    // Задание по графику для Пид ВИ на текущую секунду
+int SetPoint_Bottom; // Задание по графику для Пид НИ на текущую секунду
+int SetPoint_Pcb;    // Задание по графику для Пид ПЛАТЫ на текущую секунду
+double Input1;       // Показания термопары ВИ в текущую секунду с фильтрацией 
+byte Output1;        // Выход ПИД ВИ - мощность на текущую секнду
+double Input2;       // Показания термопары НИ в текущую секунду с фильтрацией 
+byte Output2;        // Выход ПИД НИ - мощность на текущую секнду
+double Input3;       // Показания термопары Платы в текущую секунду с фильтрацией
+float Output3;       // Выход ПИД Платы - коррекция уставки ВИ и НИ на текущую секнду
+int8_t Output3_b;    // DIAGNOSTICS - Float -> Integer чтобы выводить в COM
+
+#define SENSOR_SAMPLING_TIME 250 //время чтения температуры и пересчёта ПИД(милисекунды)
+#define COM_PORT_SAMPLE_TIME 1000//время передачи данных на РС
+
+int tc1, tc2, tc3; //Показания термопар равны input 1-2-3 целочисленные
+
+int temp_correction_top; // значение коррекции температуры ВИ регулируемое ПИД платы
+int temp_correction_bottom; // значение коррекции температуры НИ регулируемое ПИД платы
+
+//-----------------------------------------------------------
+
+//секция алгоритма Брезенхема---Распределение мощности равномерно на 1 секунду----------------
+int er1 = 1;
+int er2 = 1;
+int reg1;
+int reg2;
+boolean out1;
+boolean out2;
+//-----------------------------------------------------------
+
+//Секция кнопок, пинов подключеня-----------------------------------------
+//RelayPin "1"-ВЕРХНИЙ нагреватель
+//RelayPin "2"-НИЖНИЙ нагреватель
+#define RelayPin1 7  //назначаем пин "ВЕРХНЕГО" нагревателя
+#define RelayPin2 6  //назначаем пин "НИЖНЕГО" нагревателя
+
+// Выходы реле
+#define P1_PIN 9    //назначаем пин реле 1
+#define P2_PIN 10   //назначаем пин реле 2
+#define P3_PIN 11   //назначаем пин реле 3
+#define P4_PIN 12   //назначаем пин реле 4
+byte buzzerPin = 8; //пин пищалки
+byte cancelSwitchPin = 21; //пин кнопки отмена или назад
+
+//назначаем пины усилителя термопары MAX6675 "ВЕРХНЕГО" нагревателя   clk=sck cs=cs do=so
+byte thermoCLK1 = 14;  //=sck
+byte thermoCS1 = 15;   //=cs
+byte thermoDO1 = 16;   //=so
+
+//назначаем пины усилителя термопары MAX6675 "НИЖНЕГО" нагревателя clk=sck cs=cs do=so
+byte thermoCLK2 = 17;  //=sck
+byte thermoCS2 = 18;   //=cs
+byte thermoDO2 = 19;   //=so
+
+//назначаем пины усилителя термопары MAX6675 "ПЛАТЫ" clk=sck cs=cs do=so
+byte thermoCLK3 = 22;  //=sck
+byte thermoCS3 = 24;   //=cs
+byte thermoDO3 = 26;   //=so
+
+
+//Секция профиля----------------------------------------------------------
+struct pr {                    //основные поля профиля
+int time_step_top[30];           //время от старта профиля до шага ВИ //потолок 9 часов
+int temperature_step_top[30];    //температура в НАЧАЛЕ текущего шага ВИ
+int time_step_bottom[30];        //время от старта профиля до шага НИ
+int temperature_step_bottom[30]; //температура в НАЧАЛЕ текущего шага НИ
+int time_step_pcb[10];           //время от старта профиля до шага Платы
+int temperature_step_pcb[10];    //температура в НАЧАЛЕ текущего шага Платы
+byte profile_steps;           //количество шагов ВИ и НИ
+byte table_size;              //размер стола
+byte kp1;                     //пропорциональный коэффициент ВИ
+byte ki1;                     //интегральный коэффициент     ВИ
+byte kd1;                     //дифференциальный коэффициент ВИ
+byte kp2;                     //пропорциональный коэффициент НИ
+byte ki2;                     //интегральный коэффициент     НИ
+byte kd2;                     //дифференциальный коэффициент НИ
+byte kp3;                     //пропорциональный коэффициент Платы
+byte ki3;                     //интегральный коэффициент     Платы
+byte kd3;                     //дифференциальный коэффициент Платы
+byte max_correction_top;      //максимальная коррекция температуры ВИ в обе стороны
+byte max_correction_bottom;   //максимальная коррекция температуры НИ в обе стороны
+byte max_pcb_delta;           //максимальное отклонение температуры Платы после которого включаеся Пауза
+byte hold_lenght;             //длительность паузы в секундах
+byte participation_rate_top;  //коэфициент участия ВИ (от 0 - догреваем только низом, до 100 догреваем только верхом)(при отклонении температыры платы от профиля)
+boolean jump_if_pcb_warm;     //начинать выполнение профиля с ближайшей подходящей точки графика платы (0 - нет \ 1 - да) (горячий старт)
+};
+
+
+int SizeProfile = sizeof(pr); // длинна поля данных
+pr profile;                    //структура для параметров
+
+byte currentProfile = 1;         //текущий профиль
+byte profile_steps_pcb = 10;     //количество шагов профиля Платы
+
+int max_temperature_pcb = 250;  //Предел температуры платы. Если термопара покажет больше профиль автоматически будет остановлен.
+
+byte PreHeatPower = 3;        //мощность на этапе преднагрева НИ в процентах
+byte PreHeatTime = 5;         //время преднагрева НИ в Секундах
+
+byte ParticipationRateBottom = 0; // коэфициент участия низа. вычисляется автоматом на основе profile.participation_rate_top
+
+byte CurrentStepTop;         //номер шага профиля ВИ
+byte CurrentStepBottom;      //номер шага профиля НИ
+byte CurrentStepPcb;         //номер шага профиля Платы
+
+byte DurationCurrentStepTop;     //Длительность текущего шага ВИ
+byte DurationCurrentStepBottom;  //Длительность текущего шага НИ
+byte DurationCurrentStepPcb;     //Длительность текущего шага Платы
+
+byte TimeCurrentStepTop;     //секунд от начала текущего шага ВИ
+byte TimeCurrentStepBottom;  //секунд от начала текущего шага НИ
+byte TimeCurrentStepPcb;     //секунд от начала текущего шага Платы
+
+int TemperatureDeltaTop;     //дельта температур текущего и следующего шага ВИ
+int TemperatureDeltaBottom;  //дельта температур текущего и следующего шага НИ
+int TemperatureDeltaPcb;     //дельта температур текущего и следующего шага Платы
+
+
+int TempSpeedTop;     //Рассчитанная скорость роста температуры ВИ (может быть положительная и отрицательная) умножена на 100
+int TempSpeedBottom;  //Рассчитанная скорость роста температуры НИ (может быть положительная и отрицательная) умножена на 100
+int TempSpeedPcb;     //Рассчитанная скорость роста температуры Платы (может быть положительная и отрицательная) умножена на 100
+
+unsigned int CurrentProfileSecond; //Cчетчик времени по профилю 
+unsigned long  CurrentProfileRealSecond; // Какая сейчас секунда профиля с момента запуска (с учетом пауз, прогрева )
+
+
+//------------------------------------------------------------------------
+
+//Секция флагов-----------------------------------------------------------
+byte flag = 0;  //флаг для фиксации стартовой температуры
+byte x=1;  //переменная для перехода на нужный шаг при горячей плате
+boolean alarmOn = false; //признак ошибки
+boolean ManualHoldEnable = false; //переменная для ручного включения HOLD (удержания температуры нагревателей)
+byte AutoHoldEnable = 0; // счетчик сколько еще держать Hold
+//------------------------------------------------------------------------
+
+//Секция переменных общего назначения-------------------------------------
+
+int cancelSwitchState = 0;
+long ms_button = 0;           //время при котором была нажата кнопка
+
+long previousMillis; //это для счетчиков
+unsigned long NextReadTemperatures; //переменная для обновления текущей температуры
+
+byte Secs=0; //Счетчик количества прерываний от детектра ноля. каждые 100 отправляет данные на ПК
+
+int i = 0;
+long nextRead2 =0;
+//------------------------------------------------------------------------
+
+//секция ввода/вывода для ПЭВМ-----------------------------------------------
+char buf[30];   //буфер вывода сообщений через сом порт
+char buf1[80];  //буфер вывода праметров через сом порт 
+int b1,b2=0;
+String ttydata; //принятая строка параметров с сом порта от ПЭВМ TODO исправить под длинну профиля
+//---------------------------------------------------------------------------
+
+//these are the different states of the sketch. We call different ones depending on conditions
+// ***** TYPE DEFINITIONS *****
+typedef enum REFLOW_STATE:byte
+{
+  REFLOW_STATE_IDLE,
+  REFLOW_STATE_INIT,              // Анализ с какого шага начинать профиль, фиксация температур
+  REFLOW_STATE_PRE_HEATER,        // Прогрев ВИ и НИ на мощности PreHeatPower в течение PreHeatTime секунд, ПИД отключены. Чтобы уменьшить нагрузку на управляющие элементы.
+  REFLOW_STATE_WARMUP,            // Преднагрев до начальных значений температуры в первом шаге профиля ВИ, НИ, Платы. ПИД включены.
+  REFLOW_STATE_RUNNING,           // Выполнение профиля ВИ, НИ, Платы. (объединенные STEP)
+  REFLOW_STATE_HOLD_AUTO,         // Приостановка выполнения профиля, фиксация температур ВИ и НИ по графику, чтобы плата догрелась либо остыла (коррекция с учетом отклонения температуры платы продолжается)
+  REFLOW_STATE_HOLD_MANUAL,       // Приостановка выполнения профиля вручную, фиксация температуры ПЛАТЫ, если в профиле нет задания для платы то фиксация температуры Низа.
+  REFLOW_STATE_COMPLETE           // Завершение профиля. Из-за ошибки \ принудительной остановки \ успешного выполнения.
+}
+reflowState_t;
+
+typedef enum REFLOW_STATUS:byte //this is simply to check if reflow should be running or not
+{
+  REFLOW_STATUS_OFF,
+  REFLOW_STATUS_ON
+}
+reflowStatus_t;
+reflowStatus_t reflowStatus;
+reflowState_t reflowState;
+
+byte prev_reflowState = 0; // для сохранения состояния перед переходом в Hold 
+
+void loadProfile()//this function loads whichever profile currentProfile variable is set to  TODO исправить под новый формат профиля
+{
+   // Serial.println("LoadProfile"); //DIAGNOSTICS
+   // for (byte j=0; j<=SizeProfile-1; j++) { 
+       EEPROM.get(0,profile); // читаем профиль с EEPROM в память
+ 
+ 
+      //Вывод профиля в Serial TODO Доработать под новый формат профиля
+      sprintf (buf1, "PR%01d%01d%03d%03d%03d%02d%02d%02d%03d%03d%03d%03d%03d%03d%03d%03d%03d%03d%03d%03d%02d%02d%02d%02d%02d%02d%02d\r\n");
+
+     // Serial.println(buf1);
+ 
+      for (int a=0; a<30; a++)
+        {
+         Serial.print(profile.time_step_top[a]);  //DIAGNOSTICS
+         Serial.print(", ");
+         Serial.print(profile.temperature_step_top[a]);  //DIAGNOSTICS
+         Serial.print(", ");
+         Serial.print(profile.time_step_bottom[a]);  //DIAGNOSTICS
+         Serial.print(", ");
+         Serial.print(profile.temperature_step_bottom[a]);  //DIAGNOSTICS
+         Serial.print(", ");
+        }
+      for (int a=0; a<10; a++)
+        {
+         Serial.print(profile.time_step_pcb[a]);  //DIAGNOSTICS
+         Serial.print(", ");
+         Serial.print(profile.temperature_step_pcb[a]);  //DIAGNOSTICS
+         Serial.print(", ");
+        }
+      Serial.print("\r\nParticipation rate TOP:"); //DIAGNOSTICS
+      Serial.println(profile.participation_rate_top);  //DIAGNOSTICS
+
+      Serial.print("max_correction_top:"); //DIAGNOSTICS
+      Serial.println(profile.max_correction_top);  //DIAGNOSTICS
+      Serial.print("max_correction_bottom:"); //DIAGNOSTICS
+      Serial.println(profile.max_correction_bottom);  //DIAGNOSTICS
+      Serial.print("LoadProfileComplete, profile size:"); //DIAGNOSTICS
+      Serial.println(SizeProfile);
+      delay(100); 
+ return;
+}
+
+void SaveProfile () {  //  сохранение текущего профиля
+  for (byte j=0; j<=SizeProfile-1; j++) {
+    EEPROM.put((currentProfile-1)*SizeProfile,profile);
+  }
+  }
+
+ 
+ 
+void setup()
+{
+   Serial.begin(9600);
+    Serial.println("Setup START"); //DIAGNOSTICS
+//setup reley pins as outputs
+  pinMode(P1_PIN, OUTPUT);
+  pinMode(P2_PIN, OUTPUT);
+  pinMode(P3_PIN, OUTPUT);
+  pinMode(P4_PIN, OUTPUT);
+  pinMode(thermoCLK1, OUTPUT);
+  pinMode(thermoCLK2, OUTPUT);
+  pinMode(thermoCLK3, OUTPUT);
+  pinMode(thermoDO1, INPUT);
+  pinMode(thermoDO2, INPUT);
+  pinMode(thermoDO3, INPUT);
+  pinMode(thermoCS1, OUTPUT);
+  pinMode(thermoCS2, OUTPUT);
+  pinMode(thermoCS3, OUTPUT);
+  pinMode (cancelSwitchPin, INPUT_PULLUP); //подключен подтягивающий резистор
+  pinMode(RelayPin1, OUTPUT);
+  pinMode(RelayPin2, OUTPUT);  
+    //Мелодия приветствия Марио
+  tone(buzzerPin,1318,150);
+  delay(150);
+  tone(buzzerPin,1318,300);
+  delay(300);
+  tone(buzzerPin,1318,150);
+  delay(300);
+  tone(buzzerPin,1046,150);
+  delay(150);
+  tone(buzzerPin,1318,300);
+  delay(300);
+  tone(buzzerPin,1568,600);
+  delay(600);
+  tone(buzzerPin,784,600);
+  delay(600);
+  noTone(buzzerPin); 
+                                             
+  initEeprom();
+  loadProfile();//вызов функции loadProfile для загрузки данных профиля из eeprom     
+  NextReadTemperatures = millis();
+  attachInterrupt(0, Dimming, RISING); // настроить порт прерывания(0 или 1) 2й или 3й цифровой пин
+  reflowState = REFLOW_STATE_IDLE;
+  Serial.println("Setup END"); //DIAGNOSTICS
+}
+
+void initEeprom()//Запись в память начальных значений 
+{
+  Serial.println("EEPROM Init START"); //DIAGNOSTICS
+  if (EEPROM.read(1023) == 'B')  // записываем любое значение, при включении проверяем его, если совпадает по адресу, то профиль не перезаписываем.
+  {
+    Serial.println("EEPROM Init Skipped"); //DIAGNOSTICS
+    // чтото только для уже инициализированой памяти
+  }
+  else {
+                            // профиль:
+    static int rom1[] = {   // ДАННЫЕ для шагов НИЖЕ МОЖНО СФОРМИРОВАТЬ В EXCELL файле ПОДГОТОВКА ПРОФИЛЯ.xls
+                          // 30 время от старта профиля до шага ВИ
+                          0, 10, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320, 340, 360, 380, 400, 413, 481, 524, 0, 0, 0, 0, 0, 0, 
+                          // 30 температур по шагам ВИ
+                          84, 84, 102, 112, 122, 132, 157, 192, 211, 205, 195, 180, 180, 197, 232, 262, 289, 313, 335, 350, 344, 333, 161, 50, 0, 0, 0, 0, 0, 0, 
+                          // 30 время от старта профиля до шага НИ
+                          0, 4, 34, 54, 74, 94, 114, 134, 154, 174, 194, 214, 234, 254, 274, 294, 314, 334, 354, 374, 394, 414, 434, 524, 0, 0, 0, 0, 0, 0, 
+                          // 30 температур по шагам НИ
+                          256, 256, 306, 312, 318, 320, 325, 324, 319, 304, 288, 275, 275, 279, 294, 308, 309, 310, 311, 309, 302, 269, 194, 104, 0, 0, 0, 0, 0, 0, 
+                          // 10 время от старта профиля до шага Платы
+                          0, 4, 89, 153, 185, 262, 378, 398, 413, 524, 
+                          // 10 температур по шагам Платы
+                          79, 79, 122, 152, 162, 170, 206, 210, 210, 99
+
+
+                      };
+    static byte rom2[] = {  // кол-во шагов, размер стола
+                            23, 3,       
+                            // PID верха, 
+                            55, 7, 30,
+                            // PID низа, 
+                            63, 3, 30,
+                            // PID Платы, 
+                            63, 3, 30,
+                            // максимальная коррекция температуры ВИ, НИ
+                            50, 70,
+                            // максимальное отклонение температуры Платы после которого включаеся Пауза
+                            5, 
+                            //длительность паузы в секундах
+                            5, 
+                            //коэфициент участия ВИ (0 - догреваем только низом\ 100 - только верхом)
+                            40,
+                            //начинать выполнение профиля с ближайшей подходящей точки графика по температуре платы (0 = нет, 1 = да) (горячий старт)
+                            0
+                         };
+
+    EEPROM.put(0, rom1); // TODO добавить смещение записи
+    EEPROM.put(280, rom2);
+    
+    EEPROM.write(1023, 'B');
+    Serial.println("EEPROM Profile 1 Updated");   //DIAGNOSTICS
+    }
+}
+
+void loop()
+{
+   
+    //Считываем состояние кнопок управления для обычных кнопок
+  cancelSwitchState =!digitalRead(cancelSwitchPin);
+
+  unsigned long currentMillis = millis();
+  
+  //отключил бузер при нажатии на кнопки (нервирует), кому надо раскоментируйте ниже 6 строк
+  //if (upSwitchState == HIGH || downSwitchState == HIGH || cancelSwitchState == HIGH || okSwitchState == HIGH)
+  //{
+     //tone(buzzerPin, 1045);
+     //delay(100);
+     //noTone(buzzerPin);
+  //}
+  if (cancelSwitchState == HIGH && (millis() - ms_button) > 100) // Обработка нажатия start. 
+      if (reflowState == REFLOW_STATE_IDLE && (millis() - ms_button) > 2000)
+        {
+        ms_button =  millis();
+        reflowState = REFLOW_STATE_INIT;
+        }
+      else if ((millis() - ms_button) > 3000) // Обработка нажатия отмены. 
+      {
+        ms_button =  millis();
+        reflowState = REFLOW_STATE_COMPLETE;
+      }
+        
+
+  if (reflowState == REFLOW_STATE_COMPLETE || alarmOn) {
+    if (i < 2 && cancelSwitchState == LOW) {
+      alarmOn = true;
+      tone(buzzerPin, 1046);
+      delay(100);
+      noTone(buzzerPin);
+      delay(100);
+      tone(buzzerPin, 1046);
+      delay(100);
+      noTone(buzzerPin);
+      delay(100);
+      tone(buzzerPin, 1046);
+      delay(100);
+      noTone(buzzerPin);
+      delay(100);
+      tone(buzzerPin, 1046);
+      delay(100);
+      noTone(buzzerPin);
+      delay(100);
+      i++;
+    }
+    else {
+      i = 0;
+      alarmOn = false;
+    }
+  }
+
+  switch (reflowState)
+  {
+    case REFLOW_STATE_IDLE:
+      x = 1;             //устанавливаем переменную в исходное состояние
+      flag = 0;         //после остановки профиля сбрасываем флаг
+      
+      //блок обработки данных с ПЭВМ--------------------TODO Переписать прием-----------------------------------
+      b2=Serial.available();
+
+      if (b2 > 0) {
+        b1 = Serial.read();
+
+        if ((b1 == 'P') ) {
+        sprintf (buf, "TXSend Params\r\n");
+        Serial.println(buf);
+        delay(50);
+        loadProfile();
+        }
+
+        if (b1=='N') {
+          ttydata=ttydata+Serial.readString();
+          sprintf (buf, "TXRecive Params%02d\r\n",b2);
+          Serial.println(buf);
+          Serial.println("TX"+ttydata);
+          if (ttydata.length()==67)         //// TODO Проверить длинну
+                  {
+                    Serial.println("TXParsing...\r\n");
+                  }
+          if (ttydata.length()>67)          /// TODO Проверить длинну
+          {
+            Serial.print("TXERROR on reciever\r\n");
+            ttydata="";
+          }
+        } 
+        if (b1=='S'){
+          Serial.println("TXPC_Start");
+          tone(buzzerPin, 1045, 500);  //звуковой сигнал при старте профиля
+      //    sprintf (buf, "SYNC\r\n"); 
+      //    Serial.print(buf);
+          reflowStatus = REFLOW_STATUS_OFF;
+          reflowState = REFLOW_STATE_INIT;
+        }
+        
+        if (b1=='U') { currentProfile = currentProfile + 1;
+                      if (currentProfile >= 6) currentProfile = 1;
+                      loadProfile();//вызов функции loadProfile для загрузки данных профиля из eeprom    
+                      }
+        if (b1=='D') { currentProfile = currentProfile - 1;
+                      if (currentProfile <= 0) currentProfile = 5;
+                      loadProfile();//вызов функции loadProfile для загрузки данных профиля из eeprom    
+                    }
+        if (b1=='J') {  
+                      if (profile.jump_if_pcb_warm) 
+                        {profile.jump_if_pcb_warm = false;
+                         Serial.println("Jump_if_pcb_warm Disabled");
+                        }
+                      else
+                        {profile.jump_if_pcb_warm = true;
+                        Serial.println("Jump_if_pcb_warm ENABLE");
+                        }
+        }
+      }  
+
+
+      if (millis() > NextReadTemperatures)
+        {
+          // Read thermocouples next sampling period
+          NextReadTemperatures = millis() + SENSOR_SAMPLING_TIME;
+          Input1 = Input1*0.6 + 0.4*(max6675_read_temp(thermoCLK1,thermoCS1,thermoDO1));
+          Input2 = Input2*0.6 + 0.4*(max6675_read_temp(thermoCLK2,thermoCS2,thermoDO2));
+          Input3 = Input3*0.6 + 0.4*(max6675_read_temp(thermoCLK3,thermoCS3,thermoDO3));
+
+          tc1 = Input1;
+          tc2 = Input2;
+          tc3 = Input3;
+
+          if (isnan(Input1)) Serial.println("TXTC1Error");
+          if (isnan(Input2)) Serial.println("TXTC2Error");
+          if (isnan(Input3)) Serial.println("TXTC3Error");
+        }
+        
+        if (millis() > nextRead2)     // TODO переписать отправку данных на ПК
+        {
+        nextRead2 = millis() + COM_PORT_SAMPLE_TIME;
+      //  sprintf (buf, "OK%03d%03d%03d%03d%03d%03d%03d\r\n", (Output1), (Output2), (Output3), tc1, tc2, tc3, (currentProfile)); 
+      sprintf (buf, "$%03d %03d %03d %03d %03d %03d %03d;", (Output1), (Output2), (Output3), tc1, tc2, tc3, (currentProfile));  //DIAGNOSTICS
+       // Serial.print(buf); 
+        }
+        
+    break;  // REFLOW_STATE_IDLE
+
+
+    case REFLOW_STATE_INIT:       // выбираем точку на графике, которая соответствует текущей температуре Платы
+      previousMillis = millis();
+
+         //сбрасываем переменные
+      Output1 = 0;
+      Output2 = 0; 
+      Output3 = 0;
+      Serial.println("REFLOW_STATE_INIT");
+      integra1=0;
+      integra2=0;
+      integra3=0;
+
+      p1=0;
+      p2=0;
+      p3=0;
+
+      d1=0;
+      d2=0;
+      d3=0;
+
+      DurationCurrentStepTop=0;
+      DurationCurrentStepBottom=0;
+      DurationCurrentStepPcb=0;
+
+      TemperatureDeltaTop=0;
+      TemperatureDeltaBottom=0;
+      TemperatureDeltaPcb=0;
+
+      TempSpeedTop=0;
+      TempSpeedBottom=0;
+      TempSpeedPcb=0;
+
+      TimeCurrentStepTop=0;
+      TimeCurrentStepBottom=0;
+      TimeCurrentStepPcb=0;
+
+      CurrentStepTop = 0;
+      CurrentStepBottom = 0;
+      CurrentStepPcb = 0; 
+
+      CurrentProfileSecond = 0;
+      CurrentProfileRealSecond = 0;
+
+       
+      ParticipationRateBottom = 100 - profile.participation_rate_top; // считаем коэфициент участия низа
+
+ 
+      Serial.println("STATE_INIT var to 0\r\n"); //DIAGNOSTICS
+        //фиксируем размер стола
+      if (profile.table_size == 1) {
+       digitalWrite(P1_PIN, HIGH);
+       }
+      if (profile.table_size == 2) {
+       digitalWrite(P1_PIN, HIGH);
+       digitalWrite(P2_PIN, HIGH);
+       }
+      if (profile.table_size == 3) {
+       digitalWrite(P1_PIN, HIGH);
+       digitalWrite(P2_PIN, HIGH);
+       digitalWrite(P3_PIN, HIGH);
+       }
+
+      
+      // выбираем точку на графике, которая соответствует текущей температуре Платы
+
+      if (profile.jump_if_pcb_warm) //Если включен "Горячий старт" 
+      {
+        Serial.println("STATE_INIT HOT_Start calc\r\n"); //DIAGNOSTICS
+        if (profile.temperature_step_pcb[0] > 0 )
+        {
+          while (tc3 >= profile.temperature_step_pcb[CurrentStepPcb + 1])     // Прибавляем 1 шаг если температура платы сейчас ниже конечной температуры шага
+            {
+              CurrentStepPcb++;
+              Serial.println(CurrentStepPcb);  //DIAGNOSTICS
+              if (CurrentStepPcb >= profile_steps_pcb)  //если проверили все шаги, но температура платы сейчас выше максимальной температуры в профиле
+              {
+              Serial.print("TXERROR Pcb Tempereture too high\r\n");
+              reflowState = REFLOW_STATE_COMPLETE;
+              }
+            }
+          Serial.print("Calculated CurrentStepPcb:\r\n"); 
+          Serial.println(CurrentStepPcb);  //DIAGNOSTICS
+          if (profile.temperature_step_pcb[CurrentStepPcb] != profile.temperature_step_pcb[CurrentStepPcb + 1])
+            {
+              DurationCurrentStepPcb = profile.time_step_pcb[CurrentStepPcb + 1] - profile.time_step_pcb[CurrentStepPcb]; 
+              TemperatureDeltaPcb = profile.temperature_step_pcb[CurrentStepPcb + 1] - profile.temperature_step_pcb[CurrentStepPcb];
+              TempSpeedPcb = TemperatureDeltaPcb * 100 / DurationCurrentStepPcb;                                     //определяем скорость роста температуры на выбранном шаге
+              TimeCurrentStepPcb = (tc3 - profile.temperature_step_pcb[CurrentStepPcb]) * 100L / TempSpeedPcb;       // Домножаем на 100L, т.к делим на TempSpeedPcb которая уже умножена на 100 
+
+              Serial.print("Calculated DurationCurrentStepPcb:\r\n"); //DIAGNOSTICS
+              Serial.println(DurationCurrentStepPcb);  //DIAGNOSTICS
+              Serial.print("Calculated TemperatureDeltaPcb:\r\n"); //DIAGNOSTICS
+              Serial.println(TemperatureDeltaPcb);  //DIAGNOSTICS
+              Serial.print("Calculated TempSpeedPcb:\r\n"); //DIAGNOSTICS
+              Serial.println(TempSpeedPcb);  //DIAGNOSTICS
+              Serial.print("Calculated TimeCurrentStepPcb:\r\n"); //DIAGNOSTICS
+              Serial.println(TimeCurrentStepPcb);  //DIAGNOSTICS
+            }
+                  //Вычисляем сколько секунд должно было пройти по профилю платы до текущей температуры
+          CurrentProfileSecond = profile.time_step_pcb[CurrentStepPcb] + TimeCurrentStepPcb; // секунд от начала профиля до текущего шага платы + секунд от начала текущего шага до текущей температуры
+          SetPoint_Pcb = profile.temperature_step_pcb[CurrentStepPcb] + TimeCurrentStepPcb * TempSpeedPcb / 100L;
+
+          Serial.print("Choosen CurrentProfileSecond:\r\n"); //DIAGNOSTICS
+          Serial.println(CurrentProfileSecond);  //DIAGNOSTICS
+          Serial.print("Choosen SetPoint_Pcb:\r\n"); //DIAGNOSTICS
+          Serial.println(SetPoint_Pcb);  //DIAGNOSTICS
+        }
+      
+        
+        if (profile.temperature_step_top[0] > 0) //определяем какую температуру ВИ выбрать (только если включен горячий страт)
+          { 
+            while (CurrentProfileSecond >= profile.time_step_top[CurrentStepTop + 1])     // вычисляем с какого шшшага ВИ начинать
+            {
+              CurrentStepTop++;
+              Serial.println(CurrentStepTop);  //DIAGNOSTICS
+              if (CurrentStepTop >= profile.profile_steps)  // 
+              {
+                Serial.print("TXERROR Top Steps Overcount\r\n");
+                reflowState = REFLOW_STATE_COMPLETE;
+                break;
+              }
+            }
+            DurationCurrentStepTop = profile.time_step_top[CurrentStepTop + 1] - profile.time_step_top[CurrentStepTop];
+            TemperatureDeltaTop = profile.temperature_step_top[CurrentStepTop + 1] - profile.temperature_step_top[CurrentStepTop];
+            TempSpeedTop = TemperatureDeltaTop * 100 / DurationCurrentStepTop;
+            TimeCurrentStepTop= CurrentProfileSecond - profile.time_step_top[CurrentStepTop];
+            SetPoint_Top = profile.temperature_step_top[CurrentStepTop] + TimeCurrentStepTop * TempSpeedTop / 100L; // Находим значение температуры, которое выдать в задание преднагрева. Найти секунду от начала шага -> умножть разницу на гр\сек в текущем шаге
+
+          }
+           if (profile.temperature_step_bottom[0] > 0) //определяем какую температуру ВИ выбрать (только если включен горячий страт)
+          {
+            while (CurrentProfileSecond >= profile.time_step_bottom[CurrentStepBottom + 1])     // вычисляем с какого шшшага ВИ начинать
+            {
+              CurrentStepBottom++;
+
+              Serial.println(CurrentStepBottom);  //DIAGNOSTICS
+
+              if (CurrentStepBottom >= profile.profile_steps)  // 
+              {
+                Serial.print("TXERROR Bottom Steps Overcount\r\n");
+                reflowState = REFLOW_STATE_COMPLETE;
+                break;
+              }
+            }
+            DurationCurrentStepBottom = profile.time_step_bottom[CurrentStepBottom + 1] - profile.time_step_bottom[CurrentStepBottom];
+            TemperatureDeltaBottom = profile.temperature_step_bottom[CurrentStepBottom + 1] - profile.temperature_step_bottom[CurrentStepBottom];
+            TempSpeedBottom = TemperatureDeltaBottom * 100 / DurationCurrentStepBottom;
+            TimeCurrentStepBottom= CurrentProfileSecond - profile.time_step_bottom[CurrentStepBottom];
+            SetPoint_Bottom = profile.temperature_step_bottom[CurrentStepBottom] + TimeCurrentStepBottom * TempSpeedBottom / 100L;
+          }
+          if (CurrentProfileSecond == 0) 
+            {
+            DurationCurrentStepPcb = profile.time_step_pcb[CurrentStepPcb + 1] - profile.time_step_pcb[CurrentStepPcb];
+            DurationCurrentStepTop = profile.time_step_top[CurrentStepTop + 1] - profile.time_step_top[CurrentStepTop];
+            DurationCurrentStepBottom = profile.time_step_bottom[CurrentStepBottom + 1] - profile.time_step_bottom[CurrentStepBottom];
+            }  
+      } //конец логики горячего старта
+
+      else // если горячий старт не включен, выставляем задание для ПИД равное температуре первой секунды первого шага ВИ, НИ и Платы.
+      {
+        Serial.println("STATE_INIT COLD calc\r\n"); //DIAGNOSTICS
+
+        SetPoint_Pcb=profile.temperature_step_pcb[0];
+        SetPoint_Top=profile.temperature_step_top[0];
+        SetPoint_Bottom=profile.temperature_step_bottom[0];
+
+              
+              Serial.print("Calculated SetPoint_Pcb:\r\n"); //DIAGNOSTICS
+              Serial.println(SetPoint_Pcb);  //DIAGNOSTICS
+              Serial.print("Calculated SetPoint_Top:\r\n"); //DIAGNOSTICS
+              Serial.println(SetPoint_Top);  //DIAGNOSTICS
+              Serial.print("Calculated SetPoint_Bottom:\r\n"); //DIAGNOSTICS
+              Serial.println(SetPoint_Bottom);  //DIAGNOSTICS
+
+      }
+
+      // на выходе - номера шагов профиля ВИ, НИ, Платы (CurrentStepTop|Bottom|Pcb), а также количество секунд от их начала (TimeCurrentStepTop|Bottom|Pcb). 
+      // если температуры ВИ, НИ меньше 70 градусов -> preheat иначе warmup
+
+              Serial.print("Calculated CurrentStepPcb:\r\n"); //DIAGNOSTICS
+              Serial.println(CurrentStepPcb);  //DIAGNOSTICS
+              Serial.print("Calculated CurrentStepTop:\r\n"); //DIAGNOSTICS
+              Serial.println(CurrentStepTop);  //DIAGNOSTICS
+              Serial.print("Calculated CurrentStepBottom:\r\n"); //DIAGNOSTICS
+              Serial.println(CurrentStepBottom);  //DIAGNOSTICS
+
+      if ( tc2 < 70 ) // Если низ меньше 70 градусов - включаем плавный старт N секунд на малой мощности
+        {
+         reflowState = REFLOW_STATE_PRE_HEATER;
+        }
+      else 
+        {
+          reflowStatus = REFLOW_STATUS_ON;
+          reflowState = REFLOW_STATE_WARMUP;
+        }
+    break;
+
+
+    case REFLOW_STATE_PRE_HEATER:
+      if (currentMillis - previousMillis > 1000)   
+        {
+          Serial.println("STATE_PRE_HEATER\r\n"); //DIAGNOSTICS
+          previousMillis = currentMillis;
+          CurrentProfileRealSecond++;  
+          
+          Output2 = PreHeatPower;
+          if (profile.temperature_step_top[CurrentStepTop+1] > 1) // Если включаем верх в профиле то прогреваем и его
+            {
+              Output1 = PreHeatPower;
+            }
+          Output3 = 0;
+          if (CurrentProfileRealSecond >= PreHeatTime) //Если прошло N секунд 
+            {
+            Output1 = 0;
+            Output2 = 0;
+            reflowStatus = REFLOW_STATUS_ON; //DIAGNOSTICS
+           // reflowState = REFLOW_STATE_RUNNING; //DIAGNOSTICS
+            reflowState = REFLOW_STATE_WARMUP;
+            }
+        }
+    break;
+
+
+    // преднагрев ВИ, НИ и платы до значений первого шага / секунды на которую перепрыгиваем. На этом этапе поградусная выдача задания для ПИД (Рампа) ОТКЛЮЧЕНА. ВИ и НИ греюся максимально быстро.
+    // Проверяем только факт нагрева Платы и НИ до нужных температур. Целевые температуры определены на шаге REFLOW_STATE_INIT
+    case REFLOW_STATE_WARMUP:
+      if (currentMillis - previousMillis > 1000) 
+      { 
+        Serial.println("STATE_WARMUP\r\n"); //DIAGNOSTICS  
+        previousMillis = currentMillis;
+        CurrentProfileRealSecond++;
+
+                // Чтение Serial и отмена если E //DIAGNOSTICS
+        b2=Serial.available();
+        if (b2 > 0) {
+          b1 = Serial.read();
+          if ((b1 == 'E') ) {
+          Serial.println("STOP\r\n");
+          reflowState = REFLOW_STATE_COMPLETE;
+          }    
+        }
+
+         // Ждем когда показания термопар выйдут на нужные значения переход на Running
+        if (tc3 >= (SetPoint_Pcb - profile.max_pcb_delta)) // Если термопара Платы показывает значение больше чем  (задание - макс отклонение)
+         {  
+          if (tc2 >= (SetPoint_Bottom - profile.max_correction_bottom)) // Если термопара Низа показывает значение больше чем (задание - макс коррекция)
+          {
+            reflowState = REFLOW_STATE_RUNNING;
+          }
+         }
+        if(CurrentProfileRealSecond > 125) //Если этап преднагрева затянулся больше чем на 2 минуты то отменяем профиль.
+         {
+           Serial.println("TXERROR Warmup over 2 min\r\n");
+           reflowState = REFLOW_STATE_COMPLETE;
+         }
+      }
+    break;
+
+    case REFLOW_STATE_RUNNING: //На входе номер шага НИ, ВИ, Платы, скорости роста температур, время внутри текущего шага, текущая секунда профиля.
+      if (currentMillis - previousMillis > 1000) 
+      { 
+        Serial.println("STATE_RUNNING\r\n"); //DIAGNOSTICS       
+        previousMillis = currentMillis;
+   //     Serial.println("STATE_RUNNING\r\n"); //DIAGNOSTICS
+        // Чтение Serial и отмена если E //DIAGNOSTICS
+        b2=Serial.available();
+        if (b2 > 0) {
+          b1 = Serial.read();
+          if ((b1 == 'E') ) {
+          Serial.println("STOP\r\n");
+          reflowState = REFLOW_STATE_COMPLETE;
+          }    
+        }
+          // Логика для графика Платы
+        if ((profile.time_step_pcb[CurrentStepPcb] > 0) || (profile.temperature_step_pcb[CurrentStepPcb] > 0))   // Если время шага и температура по профилю в начале текущего шага > 0 
+          {
+            if (CurrentProfileSecond >= profile.time_step_pcb[CurrentStepPcb + 1]) // if (CurrentProfileSecond==0 ||  если счетчик времени по профилю 0 или >= времени начала следующего шага
+            {                                      //переходим на следующий шаг профиля, считаем продолжительность, изменение температуры за шаг, скорость роста температуры
+              CurrentStepPcb++;
+              DurationCurrentStepPcb = profile.time_step_pcb[CurrentStepPcb + 1] - profile.time_step_pcb[CurrentStepPcb]; 
+              TemperatureDeltaPcb = profile.temperature_step_pcb[CurrentStepPcb + 1] - profile.temperature_step_pcb[CurrentStepPcb];
+              TempSpeedPcb = TemperatureDeltaPcb * 100 / DurationCurrentStepPcb;
+              TimeCurrentStepPcb = 0;                                      //определяем скорость роста температуры на текущем шаге
+            }
+            SetPoint_Pcb = profile.temperature_step_pcb[CurrentStepPcb] + TimeCurrentStepPcb * TempSpeedPcb / 100; // задание для ПИД = начальная температура шага + секунд от начала текущего шага * рост температуры в секунду (ошибка не накопится)
+            TimeCurrentStepPcb++; // прибавляем +1 счетчику секунд от начала шага
+          }
+        else 
+          { 
+            SetPoint_Pcb = 0;
+          }
+            // Логика для графика НИ
+        if (profile.time_step_bottom[CurrentStepBottom] > 0 || profile.temperature_step_bottom[CurrentStepBottom] > 0)   // Если время шага и температура по профилю в начале текущего шага > 0
+          {
+            if (CurrentProfileSecond >= profile.time_step_bottom[CurrentStepBottom + 1]) //если счетчик времени по профилю >= времени начала следующего шага
+            {                                       //переходим на следующий шаг профиля, считаем продолжительность, изменение температуры за шаг, скорость роста температуры
+              CurrentStepBottom++;
+              if (CurrentStepBottom == profile.profile_steps) //Если достигли последнего шага низа завершаем профиль
+                { 
+                  reflowState = REFLOW_STATE_COMPLETE;
+                  Serial.print("TX OK Last Bottom Step Complete\r\n");
+                  break;
+                }
+              DurationCurrentStepBottom = profile.time_step_bottom[CurrentStepBottom + 1] - profile.time_step_bottom[CurrentStepBottom]; 
+              TemperatureDeltaBottom = profile.temperature_step_bottom[CurrentStepBottom + 1] - profile.temperature_step_bottom[CurrentStepBottom];
+              TempSpeedBottom = TemperatureDeltaBottom * 100 / DurationCurrentStepBottom;
+              TimeCurrentStepBottom = 0;                                      //определяем скорость роста температуры на текущем шаге
+            }
+            SetPoint_Bottom = profile.temperature_step_bottom[CurrentStepBottom] + TimeCurrentStepBottom * TempSpeedBottom / (uint8_t)100; // задание для ПИД = начальная температура шага + секунд от начала текущего шага * рост температуры в секунду
+            TimeCurrentStepBottom++; // прибавляем +1 счетчику секунд от начала шага
+
+       //       Serial.print("CurrentStepBottom: "); //DIAGNOSTICS
+       //       Serial.println(CurrentStepBottom);  //DIAGNOSTICS
+      //        Serial.print("TempSpeedBottom:\r\n"); //DIAGNOSTICS
+      //        Serial.println(TempSpeedBottom);  //DIAGNOSTICS
+      //        Serial.print("Temp By Profile:\r\n"); //DIAGNOSTICS
+     //         Serial.println(profile.temperature_step_bottom[CurrentStepBottom]);  //DIAGNOSTICS              
+       //       Serial.print("SetPoint_Bottom: "); //DIAGNOSTICS
+      //        Serial.println(SetPoint_Bottom);  //DIAGNOSTICS
+      //        Serial.print("TimeCurrentStepBottom: "); //DIAGNOSTICS
+      //        Serial.println(TimeCurrentStepBottom);  //DIAGNOSTICS
+
+          }
+        else 
+          {
+            SetPoint_Bottom = 0;
+            Serial.print("SetPoint_Bottom: 0\r\n"); //DIAGNOSTICS
+          }
+          // Логика для графика ВИ
+        if (profile.time_step_top[CurrentStepTop] > 0 || profile.temperature_step_top[CurrentStepTop] > 0)   // Если время шага и температура по профилю в начале текущего шага > 1 
+          {
+            if  (CurrentProfileSecond >= profile.time_step_top[CurrentStepTop + 1]) //если счетчик времени по профилю >= времени начала следующего шага
+            {                                       //переходим на следующий шаг профиля, считаем продолжительность, изменение температуры за шаг, скорость роста температуры
+              CurrentStepTop++;
+              DurationCurrentStepTop = profile.time_step_top[CurrentStepTop + 1] - profile.time_step_top[CurrentStepTop]; 
+              TemperatureDeltaTop = profile.temperature_step_top[CurrentStepTop + 1] - profile.temperature_step_top[CurrentStepTop];
+              TempSpeedTop = TemperatureDeltaTop * 100 / DurationCurrentStepTop;
+              TimeCurrentStepTop = 0;                                      //определяем скорость роста температуры на текущем шаге
+            }
+            SetPoint_Top = profile.temperature_step_top[CurrentStepTop] + TimeCurrentStepTop * TempSpeedTop / (uint8_t)100; // задание для ПИД = начальная температура шага + секунд от начала текущего шага * рост температуры в секунду
+            TimeCurrentStepTop++; // прибавляем +1 счетчику секунд от начала шага
+          }
+        else 
+          {
+            SetPoint_Top = 0;
+          }
+        if (SetPoint_Pcb == 0 && SetPoint_Bottom == 0) //если задание для ПИД платы и для низа по нолям -> закончить профиль (т.к. отдельно верхом мы не паяем)
+          {
+            reflowState = REFLOW_STATE_COMPLETE; 
+          }
+
+       
+        if (profile.max_pcb_delta < abs(SetPoint_Pcb - tc3)) //если температура платы отклонилась от графика больше чем max_pcb_delta - переходим в режим HOLD (удержание температуры нагревателей, ждем пока плата догреется)
+          {           
+            if (AutoHoldEnable == 0 ) // DIAGNOSTICS(добавить =) выставляем счетчик по новой только если отсчитали предыдущий цикл полностью. Если за эти N секунд температура не вышла в диспазон допустимого отклонения - Можно включать HOLD по новой
+              {
+              AutoHoldEnable = profile.hold_lenght;
+              }
+            reflowState = REFLOW_STATE_HOLD_AUTO; 
+          }
+
+
+      CurrentProfileSecond++;
+      CurrentProfileRealSecond++;
+      Serial.print("CurrentProfileSecond: "); //DIAGNOSTICS
+      Serial.println(CurrentProfileSecond);  //DIAGNOSTICS
+      Serial.print("CurrentProfileRealSecond: "); //DIAGNOSTICS
+      Serial.println(CurrentProfileRealSecond);  //DIAGNOSTICS
+      }
+    break;
+
+    case REFLOW_STATE_HOLD_AUTO:  //попадаем в HOLD, задания для НИ, ВИ, и платы по графику остаются как в последнюю секунду. Только ПИД платы вносит небольшие коррективы в температуры ВИ и НИ .
+      if (currentMillis - previousMillis > 1000)    
+        { 
+          Serial.println("HOLD_AUTO\r\n"); //DIAGNOSTICS 
+          previousMillis = currentMillis; 
+          CurrentProfileRealSecond = CurrentProfileRealSecond +1; // продолжаем считать полное время выполнения
+          if (AutoHoldEnable > 0 ) 
+          {
+            AutoHoldEnable--;
+            Serial.print("Auto Hold Counting:"); //DIAGNOSTICS
+            Serial.println(AutoHoldEnable); //DIAGNOSTICS
+          }
+          else 
+          {
+             reflowState = REFLOW_STATE_RUNNING;
+          }
+        }
+    break;
+
+    case REFLOW_STATE_HOLD_MANUAL:
+      if (currentMillis - previousMillis > 1000)  //1 раз в секунду проверяем не нажали ли отмену \ отключение HOLD
+      {
+        previousMillis = currentMillis;
+        CurrentProfileRealSecond = CurrentProfileRealSecond +1;
+        Serial.print("HOLD_MANUAL ENABLED"); //DIAGNOSTICS
+      }
+    break;
+
+    //завершение пайки      
+    case REFLOW_STATE_COMPLETE:
+       digitalWrite(P1_PIN, LOW);
+       digitalWrite(P2_PIN, LOW);
+       digitalWrite(P3_PIN, LOW);
+       digitalWrite(P4_PIN, LOW);
+       if (b1=='E') {Serial.println("TXStop_PC"); b1=' ';} else {Serial.println("TXStop");}
+      reflowStatus = REFLOW_STATUS_OFF;
+      Output1=0;
+      Output2=0;
+      Output3=0; 
+      Serial.println("REFLOW_STATE_COMPLETE");    
+      reflowState = REFLOW_STATE_IDLE;
+    break;
+  }// End of Switch
+
+    //включение нагревателей
+    if (reflowStatus == REFLOW_STATUS_ON)
+    {
+      b2=Serial.available();
+      if (b2 > 0) 
+        {
+        b1 = Serial.read();
+        if (b1 == 'E') reflowState = REFLOW_STATE_COMPLETE; // Обработка команды Отмены выполнения
+        if (b1 == 'H')
+         {
+          if (reflowState != REFLOW_STATE_HOLD_MANUAL)  // Обработка команды Hold
+           { 
+            prev_reflowState = reflowState;
+            reflowState = REFLOW_STATE_HOLD_MANUAL;
+           }
+          else
+          { 
+            reflowState = prev_reflowState;
+            Serial.println("HOLD_MANUAL Disabled"); 
+          }
+         }
+       }
+
+      if (millis() > NextReadTemperatures)
+       {
+        NextReadTemperatures = millis() + SENSOR_SAMPLING_TIME;
+     //    Input1 = Input1*0.6 + 0.4*(max6675_read_temp (thermoCLK1,thermoCS1,thermoDO1));
+     //    Input2 = Input2*0.6 + 0.4*(max6675_read_temp (thermoCLK2,thermoCS2,thermoDO2));
+     //    Input3 = Input3*0.6 + 0.4*(max6675_read_temp (thermoCLK3,thermoCS3,thermoDO3));
+
+          Input1+=0.015*Output1-0.8; // DIAGNOSTICS
+          Input2+=Output2*0.025-1; // DIAGNOSTICS
+          Input3+=0.01*Input1+0.015*Input2-0.04*Input3 - 0.4; // DIAGNOSTICS
+ 
+          tc1 = Input1; 
+          tc2 = Input2; 
+          tc3 = Input3; 
+        if (reflowState != REFLOW_STATE_PRE_HEATER)       // Ограничить режимы в которых пересчитываем PID
+         {
+  
+
+      //      Output3=(SetPoint_Pcb == 0) ? 0 : Pid3(Input3,SetPoint_Pcb,profile.kp3,profile.ki3,profile.kd3);         // если задание для ПИД платы 0 - не считаем его (не корректируем температуру)
+          Output3=(SetPoint_Pcb == 0) ? 0 :Output3*0.98+0.02*Pid3(Input3,SetPoint_Pcb,profile.kp3,profile.ki3,profile.kd3);         // если задание для ПИД платы 0 - не считаем его (не корректируем температуру) //TODO Определится какой ПИД используем и какие настройки фильтрации значений выбрать.
+
+          temp_correction_top = Output3 * profile.participation_rate_top / (uint8_t)100;                          // вычисляем на сколько градусов скорректировать значние по графику
+          temp_correction_top = (temp_correction_top < profile.max_correction_top) ? temp_correction_top : profile.max_correction_top; // проверяем не превышает ли макс значение коррекции
+          
+          temp_correction_bottom = Output3 * ParticipationRateBottom / (uint8_t)100;                              // ParticipationRateBottom без profile. 
+          temp_correction_bottom = (temp_correction_bottom < profile.max_correction_bottom) ? temp_correction_bottom : profile.max_correction_bottom; // проверяем не превышает ли макс значение коррекции
+         
+          Output2 = Pid2(Input2,temp_correction_bottom + SetPoint_Bottom,profile.kp2,profile.ki2,profile.kd2);
+          Output1 = (profile.temperature_step_top[CurrentStepTop] == 0) ? 0 : Pid1(Input1,temp_correction_top + SetPoint_Top,profile.kp1,profile.ki1,profile.kd1); // если для ВИ есть задание по графику, считаем ПИД верха
+          Output3_b = Output3;
+ 
+          }
+
+
+    //  sprintf (buf, "OK%03d%03d%03d%03d%03d%03d%03d\r\n", (Output1), (Output2), (Output3), tc1, tc2, tc3, (CurrentProfileRealSecond)); // TODO исправить формат отправки для графика ПК
+        sprintf (buf, "$%03d %03d %03d %03d %03d %03d;", (Output1), (Output2), (Output3_b), tc1, tc2, tc3); // TODO исправить формат отправки для графика ПК
+        
+        if (isnan(Input1)) Serial.println("TXTC1Error");
+        if (isnan(Input2)) Serial.println("TXTC2Error");
+        if (isnan(Input3)) Serial.println("TXTC3Error");
+       }
+      }
+            
+      if (profile.temperature_step_pcb[CurrentStepPcb+1] == tc3-3){      //Сигнал если достигли температуры следующего шага TODO заменить на фикс температуру из профиля?
+       digitalWrite(P4_PIN, HIGH);
+       tone(buzzerPin, 1045, 500);  //звуковой сигнал
+       } 
+      if (tc3 >= max_temperature_pcb)   //если температура платы достигла предела (250гр например) прервать выполнение профиля
+       {
+         digitalWrite(P1_PIN, LOW);
+         digitalWrite(P2_PIN, LOW);
+         digitalWrite(P3_PIN, LOW);
+         digitalWrite(P4_PIN, LOW);
+         Output2 = 0;    
+         Output1 = 0;
+         tone(buzzerPin, 1045, 400);  //звуковой сигнал
+         Serial.println("TXERROR PCB Overheat");
+         reflowStatus = REFLOW_STATUS_OFF;
+         reflowState = REFLOW_STATE_COMPLETE;    
+       }       
+}
+
+
+void Dimming()  //Вызывается по прерыванию от детектора ноля 100 раз в секунду
+{
+  OutPWR_TOP();
+  OutPWR_BOTTOM();
+
+  if (Secs >= 100) // каждые 100 прерываний отправляем данные через serial
+  {
+    Serial.println(buf);
+	  Secs=1;                           // Начинаем считать с 1, т.к. в первый шаг мы только присваиваем значение, но не прибавляем.
+  } else Secs++;
+
+}
+
+void OutPWR_TOP(){
+       reg1 = Output1 + er1; //pwr- задание выходной мощности в %,в текущем шаге профиля, er- ошибка округления   
+        if (reg1 < 50){
+          out1 = LOW;
+          er1 = reg1; // reg- переменная для расчетов
+          }
+        else {
+          out1 = HIGH;
+          er1 = reg1-100;
+        }
+       digitalWrite(RelayPin1,out1);//пин через который осуществляется дискретное управление   
+       }
+       
+void OutPWR_BOTTOM(){
+       reg2 = Output2 + er2; //pwr- задание выходной мощности в %, er- ошибка округления
+        if (reg2 < 50){
+          out2 = LOW;
+          er2 = reg2; // reg- переменная для расчетов
+        }
+        else {
+          out2 = HIGH;
+          er2 = reg2-100;
+        }
+       digitalWrite(RelayPin2,out2);//пин через который осуществляется дискретное управление
+       }
+       
+byte Pid1(double temp, int ust, byte kP, byte kI, byte kd) 
+ {
+        byte out = 0;
+        static float ed = 0;
+        e1 = (ust - temp); //ошибка регулирования
+        p1 =  (kP * e1); //П составляющая
+        integra1 = (integra1 < i_min) ? i_min : (integra1 > i_max) ? i_max : integra1 + (kI * e1)/1000.0; //И составляющая
+        d1 = kd * (temp - ed); //Д составляющая
+        ed = temp;
+        out = (p1 + integra1 - d1 >= 100 ) ? 100 : (p1 + integra1 - d1 <= 0 ) ? 0 : p1 + integra1 - d1;  //  Выход ПИД от 0 до 100.
+        return out;
+ }
+
+byte Pid2(double temp, int ust, byte kP, byte kI, byte kd) 
+ {
+        byte out = 0;
+        static float ed = 0;
+        e2 = (ust - temp); //ошибка регулирования
+        p2 =  (kP * e2); //П составляющая
+        integra2 = (integra2 < i_min) ? i_min : (integra2 > i_max) ? i_max : integra2 + (kI * e2)/1000.0; //И составляющая
+        d2 = kd * (temp - ed); //Д составляющая
+        ed = temp;
+        out = (p2 + integra2 - d2 >= 100 ) ? 100 : (p2 + integra2 - d2 <= 0 ) ? 0 : p2 + integra2 - d2; //  Выход ПИД от 0 до 100.
+        return out;
+ }
+
+int8_t Pid3(double temp, int ust, byte kP, byte kI, byte kd) // Темп фактически, темп должно быть, коэфициенты пид, результат - значение коррекции для ПИД ВИ и НИ в градусах (от -100 до 100) 
+ {
+        int8_t out = 0;
+        static float ed = 0;
+        e3 = (ust - temp); //ошибка регулирования
+        p3 =  (kP * e3); //П составляющая
+        integra3 = (integra3 < i_min) ? i_min : (integra3 > i_max) ? i_max : integra3 + (kI * e3)/1000.0; //И составляющая
+        d3 = kd * (temp - ed); //Д составляющая
+        ed = temp;
+        out = (p3 + integra3 - d3 > 100 ) ? 100 : (p3 + integra3 - d3 < -100 ) ? -100 : p3 + integra3 - d3; // Ограничиваем выходные значения
+        return out;
+ }
+
+
+int8_t PidTEST(double temp, int ust, byte kP, byte kI, byte kd) // Сглаживание дифференциальной составляющей на 4 шага 
+ {
+        int8_t out = 0;
+        static float ed = 0;
+        e3 = (ust - temp); //ошибка регулирования
+        p3 =  (kP * e3); //П составляющая
+        integra3 = (integra3 < i_min) ? i_min : (integra3 > i_max) ? i_max : integra3 + (kI * e3)/1000.0; //И составляющая
+        d3 = d3 * 0.75 + 0.25*kd * (e3 - ed); //Д составляющая
+        ed = e3;
+        out = (p3 + integra3 + d3 > 100 ) ? 100 : (p3 + integra3 - d3 < -100 ) ? -100 : p3 + integra3 - d3; // Ограничиваем выходные значения
+        return out;
+ }
+ 
+
+
+double max6675_read_temp (int ck, int cs, int so)              
+ {char i; 
+    int tmp = 0; 
+   digitalWrite(cs, LOW);//cs = 0;                            // Stop a conversion in progress 
+   asm volatile (" nop" "\n\t");
+   for (i=15;i>=0;i--)
+    {  digitalWrite(ck, HIGH);
+      asm volatile (" nop"  "\n\t");
+      if( digitalRead(so))
+      tmp|=(1<<i);
+      digitalWrite(ck, LOW);
+      asm volatile(" nop"  "\n\t");
+    } 
+   digitalWrite(cs, HIGH);
+   if (tmp & 0x4) {
+     return NAN; 
+   } else 
+   return ((tmp>>3))*0.25;
+ }
