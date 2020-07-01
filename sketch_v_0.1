@@ -31,17 +31,18 @@
 
 
 // TODO 
-//0. На этапе Preheat рост интегральной составляющей *4
+ 
 //1.Вывод всех ошибок в Буфер данных в 2 потока: Статусы, Информация для графиков.
 //2.Отправка данных на пк: во время выполнения профиля: температура, мощности, время по графику, время факт. Включена ли пауза. Синхронизация данных о профиле в начале программы
-//3.Получение данных с ПК: Профиль, команды вкл\выкл\пауза, переключение профилей.
+//3. ++ в тестовом режиме, // Получение данных с ПК: Профиль, команды вкл\выкл\пауза, переключение профилей.
 //4.Режим удержания температуры платы на хх градусов
 //5.режим удержания температуры нагревателя на хх градусов
 //6. Автотюнинг ПИД
-//7. Исправить Перерегулирование ПИД платы на этапе Warmup
-//8. Исправить активацию автопаузы на этапе остывания (последний шаг) 
+//7. +++++++++++++ DONE Исправить Перерегулирование ПИД платы на этапе Warmup ++++++++++++++ FIXED AntiWindup
+//8. Исправить активацию автопаузы на этапе остывания (последний шаг) FIXED (?)
 //9. Подумать как вносить коррекцию с учетом инерционности нагревателей. //если с таким-же темпом роста температуры как в последние N секунд
-//10. Метки времени \ температуры для подачи сигналов
+//10. Метки времени \ температуры для подачи сигналов - Доп канал для статусов: 0 - не выполняется - 10 пауза - 100 - Бип - 250 ошибка
+//11. В режиме паузы ввести возможность корректировать температуру ВИ\Плаиы
 
 
 
@@ -168,7 +169,7 @@ int PcbDelta, BottomDelta, TopDelta;     // Отклонение темпера�
 
 
 
-const int max_temperature_pcb = 250;    //Предел температуры платы. Если термопара покажет больше профиль автоматически будет остановлен.
+const int max_temperature_pcb = 240;    //Предел температуры платы. Если термопара покажет больше профиль автоматически будет остановлен.
 const byte PreHeatPower = 3;            //мощность на этапе преднагрева НИ в процентах
 const byte PreHeatTime = 5;             //время преднагрева НИ в Секундах
 const byte profile_steps_pcb = 10;      //количество шагов профиля Платы
@@ -236,34 +237,11 @@ byte prev_reflowState = 0; // для сохранения состояния п�
 
 void loadProfile()//this function loads whichever profile currentProfile variable is set to  TODO исправить под новый формат профиля
 {
-   // Serial.println("LoadProfile"); //DIAGNOSTICS
-   // for (byte j=0; j<=SizeProfile-1; j++) { 
-       EEPROM.get(0,profile); // читаем профиль с EEPROM в память
-  
-       ParticipationRateBottom = 100 - profile.participation_rate_top; // считаем коэфициент участия низа
-      //Вывод профиля в Serial TODO Доработать под новый формат профиля
-    //  sprintf (buf1, "PR%01d%01d%03d%03d%03d%02d%02d%02d%03d%03d%03d%03d%03d%03d%03d%03d%03d%03d%03d%03d%02d%02d%02d%02d%02d%02d%02d\r\n");
-
-     // Serial.println(buf1);
  
-//      for (int a=0; a<30; a++)
-//        {
-//         Serial.print(profile.time_step_top[a]);  //DIAGNOSTICS
-//         Serial.print(", ");
-//         Serial.print(profile.temperature_step_top[a]);  //DIAGNOSTICS
-//         Serial.print(", ");
-//         Serial.print(profile.time_step_bottom[a]);  //DIAGNOSTICS
-//         Serial.print(", ");
-//         Serial.print(profile.temperature_step_bottom[a]);  //DIAGNOSTICS
-//         Serial.print(", ");
- //       }
- //     for (int a=0; a<10; a++)
-//        {
-//         Serial.print(profile.time_step_pcb[a]);  //DIAGNOSTICS
-//         Serial.print(", ");
-//         Serial.print(profile.temperature_step_pcb[a]);  //DIAGNOSTICS
-//         Serial.print(", ");
-//        }
+      EEPROM.get((currentProfile-1)*SizeProfile,profile); // читаем профиль с EEPROM в память
+  
+      ParticipationRateBottom = 100 - profile.participation_rate_top; // считаем коэфициент участия низа
+ 
       Serial.print("\r\nParticipation rate TOP:"); //DIAGNOSTICS
       Serial.println(profile.participation_rate_top);  //DIAGNOSTICS
       Serial.print("\r\nParticipation rate Bottom:"); //DIAGNOSTICS  
@@ -275,22 +253,34 @@ void loadProfile()//this function loads whichever profile currentProfile variabl
       Serial.print("LoadProfileComplete, profile size:"); //DIAGNOSTICS
       Serial.println(SizeProfile);
 
+      Serial.print("Kp1:"); //DIAGNOSTICS
+      Serial.print(profile.kp1);
+      Serial.print(" Ki1:"); //DIAGNOSTICS
+      Serial.print(profile.ki1);
+      Serial.print(" Kd1:"); //DIAGNOSTICS
+      Serial.println(profile.kd1);
+      
       Serial.print("Kp2:"); //DIAGNOSTICS
-      Serial.println(profile.kp2);
-
-      Serial.print("Ki2:"); //DIAGNOSTICS
-      Serial.println(profile.ki2);
-
-      Serial.print("Kd2:"); //DIAGNOSTICS
+      Serial.print(profile.kp2);
+      Serial.print(" Ki2:"); //DIAGNOSTICS
+      Serial.print(profile.ki2);
+      Serial.print(" Kd2:"); //DIAGNOSTICS
       Serial.println(profile.kd2);
+    
+      Serial.print("Kp3:"); //DIAGNOSTICS
+      Serial.print(profile.kp3);
+      Serial.print(" Ki3:"); //DIAGNOSTICS
+      Serial.print(profile.ki3);
+      Serial.print(" Kd3:"); //DIAGNOSTICS
+      Serial.println(profile.kd3);
       delay(100); 
+      Serial.print("Profile Number:"); //DIAGNOSTICS
+      Serial.println(currentProfile);
  return;
 }
 
-void SaveProfile () {  //  сохранение текущего профиля
-  for (byte j=0; j<=SizeProfile-1; j++) {
+void SaveProfile () {  //  сохранение текущего профиля в позицию currentProfile
     EEPROM.put((currentProfile-1)*SizeProfile,profile);
-  }
   }
 
  
@@ -342,9 +332,9 @@ void setup()
 }
 
 
-const char EEPROM_No_Write = '3'; // <----------------- Изменить значение на любое другое, чтобы обновить профиль в EEPROM при заливке скетча
+const char EEPROM_No_Write = '4'; // <----------------- Изменить значение на любое другое, чтобы обновить профиль в EEPROM при заливке скетча
 
-void initEeprom()//Запись в память начальных значений 
+void initEeprom()//Запись в 0 позицию профиля по умолчанию
 {
   Serial.println("EEPROM Init START"); //DIAGNOSTICS
   if (EEPROM.read(1023) == EEPROM_No_Write)  // записываем любое значение, при включении проверяем его, если совпадает по адресу, то профиль не перезаписываем.
@@ -370,11 +360,11 @@ void initEeprom()//Запись в память начальных значен�
 
                       };
     static byte rom2[] = {  // кол-во шагов, размер стола
-                            23, 3,       
+                            27, 3,       
                             // PID верха, 
-                            3, 4, 6,
+                            31, 23, 37,
                             // PID низа, 
-                            1, 4, 5,
+                            6, 23, 8,
                             // PID Платы, 
                             5, 15, 12,
                             // максимальная коррекция температуры ВИ, НИ
@@ -476,13 +466,15 @@ void loop()
           sprintf (buf, "TXRecive Params%02d\r\n",b2);
           Serial.println(buf);
           Serial.println("TX"+ttydata);
-          if (ttydata.length()==67)         //// TODO Проверить длинну
+          if (ttydata.length()==557)         //// TODO Проверить длинну
                   {
                     Serial.println("TXParsing...\r\n");
+                    ParseParameters();
                   }
-          if (ttydata.length()>67)          /// TODO Проверить длинну
+          if (ttydata.length()>557)          /// TODO Проверить длинну
           {
-            Serial.print("TXERROR on reciever\r\n");
+            Serial.print("TXERROR profile size not match\r\n");
+            Serial.print(ttydata.length());
             ttydata="";
           }
         } 
@@ -495,14 +487,14 @@ void loop()
           reflowState = REFLOW_STATE_INIT;
         }
         
-        if (b1=='U') { currentProfile = currentProfile + 1;
+        if (b1=='U') {currentProfile = currentProfile + 1;
                       if (currentProfile >= 6) currentProfile = 1;
                       loadProfile();//вызов функции loadProfile для загрузки данных профиля из eeprom    
                       }
         if (b1=='D') { currentProfile = currentProfile - 1;
                       if (currentProfile <= 0) currentProfile = 5;
                       loadProfile();//вызов функции loadProfile для загрузки данных профиля из eeprom    
-                    }
+                     }
         if (b1=='J') {  
                       if (profile.jump_if_pcb_warm) 
                         {profile.jump_if_pcb_warm = false;
@@ -537,7 +529,7 @@ void loop()
         {
         nextRead2 = millis() + COM_PORT_SAMPLE_TIME;
       //  sprintf (buf, "OK%03d%03d%03d%03d%03d%03d%03d\r\n", (Output1), (Output2), (Output3), tc1, tc2, tc3, (currentProfile)); 
-      sprintf (buf, "$%03d %03d %03d %03d %03d %03d %s;", (Output1), (Output2), (int)(Output3), tc1, tc2, tc3, buf1);  //DIAGNOSTICS
+      sprintf (buf, "$%03d %03d %03d %03d %03d %03d %03d %03d %03d;", (Output1), (Output2), (int)(Output3), tc1, tc2, tc3, (int)(p2), (int)(integra2), (int)(d2));  //DIAGNOSTICS
        // Serial.print(buf); 
         }
         
@@ -772,7 +764,7 @@ void loop()
         CurrentProfileRealSecond++;
 
          // Ждем когда показания термопар выйдут на нужные значения переход на Running
-        if (tc3 >= (SetPoint_Pcb - profile.max_pcb_delta)) // Если термопара Платы показывает значение больше чем  (задание - макс отклонение)
+        if (tc3 >= abs(SetPoint_Pcb - profile.max_pcb_delta/2)) // Если термопара Платы показывает значение больше чем половина  (задание - макс отклонение)
          {  
           if (tc2 >= (SetPoint_Bottom - profile.max_correction_bottom)) // Если термопара Низа показывает значение больше чем (задание - макс коррекция)
           {
@@ -998,10 +990,12 @@ void loop()
           }
 
 
-    //  sprintf (buf, "OK%03d%03d%03d%03d%03d%03d%03d\r\n", (Output1), (Output2), (Output3), tc1, tc2, tc3, (CurrentProfileRealSecond)); // TODO исправить формат отправки для графика ПК
-        sprintf (buf, "$%03d %03d %03d %03d %03d %03d %03d %03d %03d;", (Output1), (Output2), (Output3_b), tc1, tc2, tc3, (TopDelta), (BottomDelta), (PcbDelta)); // TODO исправить формат отправки для графика ПК
+       //  sprintf (buf, "OK%03d%03d%03d%03d%03d%03d%03d\r\n", (Output1), (Output2), (Output3), tc1, tc2, tc3, (CurrentProfileRealSecond)); // TODO исправить формат отправки для графика ПК
+       // sprintf (buf, "$%03d %03d %03d %03d %03d %03d %03d %03d %03d;", (Output1), (Output2), (Output3_b), tc1, tc2, tc3, (TopDelta), (BottomDelta), (PcbDelta)); // TODO исправить формат отправки для графика ПК
        // sprintf (buf1, "%03d %03d %03d", (tc1-SetPoint_Top-50), (tc2-SetPoint_Bottom-50), (tc3-SetPoint_Pcb-50)); //Diagnostics - отклонения температур 
-      
+        sprintf (buf, "$%03d %03d %03d %03d %03d %03d %03d %03d %03d;", (Output1), (Output2), (int)(Output3), tc1, tc2, tc3, TopDelta, BottomDelta, PcbDelta);  //DIAGNOSTICS
+       // sprintf (buf, "$%03d %03d %03d %03d %03d %03d %03d %03d %03d;", (Output1), (Output2), (int)(Output3), tc1, tc2, tc3, (int)(p2), (int)(integra2), (int)(d2));  //DIAGNOSTICS
+     
         if (isnan(Input1)) Serial.println("TXTC1Error");
         if (isnan(Input2)) Serial.println("TXTC2Error");
         if (isnan(Input3)) Serial.println("TXTC3Error");
@@ -1068,14 +1062,14 @@ void OutPWR_BOTTOM(){
        digitalWrite(RelayPin2,out2);//пин через который осуществляется дискретное управление
        }
        
-byte Pid1(double temp, int ust, byte kP, byte kI, byte kd) 
- {
-        byte out = 0;
+byte Pid1(double temp, int ust, byte kP, byte kI, byte kD) 
+ {      
+        static byte out = 0;
         static float ed = 0;
         e1 = (ust - temp); //ошибка регулирования
-        p1 =  (kP * e1); //П составляющая
-        integra1 = (integra1 < i_min) ? i_min : (integra1 > i_max) ? i_max : integra1 + (kI * e1)/1000.0; //И составляющая
-        d1 = kd * (temp - ed); //Д составляющая 
+        p1 =  (kP * e1) / 10; //П составляющая
+        integra1 = ((out > 99) && (e1*integra1>=0)) ? integra1 : (integra1 < i_min) ? i_min : (integra1 > i_max) ? i_max : integra1 + (kI * e1)/10000.0; //И составляющая
+        d1 = kD * (temp - ed); //Д составляющая 
         ed = temp;
         out = (p1 + integra1 - d1 >= 100 ) ? 100 : (p1 + integra1 - d1 <= 0 ) ? 0 : p1 + integra1 - d1;  //  Выход ПИД от 0 до 100.
         return out;
@@ -1125,29 +1119,28 @@ int8_t PidTEST(double temp, int ust, byte kP, byte kI, byte kd) // Сглажи�
         return out;
  }
  
-byte PidTEST2(double temp, int ust, byte kP, byte kI, byte kd) // Сглаживание дифференциальной составляющей на 4 шага 
+byte PidTEST2(double temp, int ust, byte kP, byte kI, byte kD) // Сглаживание дифференциальной составляющей на 4 шага 
  {
-        byte out = 0;
-        static float ed = 0;
-        e2 = e2 * 0.75 + 0.25 * (ust - temp); //ошибка регулирования Сглаживание на 4 шага
-        p2 =  (kP * e2); //П составляющая
-        integra2 = (integra2 < i_min) ? i_min : (integra2 > i_max) ? i_max : integra2 + (kI * e2)/1000.0; //И составляющая
-        d2 = kd * (e2 - ed); //Д составляющая
-        ed = e2;
-        out = (p2 + integra2 + d2 >= 100 ) ? 100 : (p2 + integra2 + d2 <= 0 ) ? 0 : p2 + integra2 + d2; // Ограничиваем выходные значения
+        static byte out;
+        static byte buff_position;
+        static const byte buff_depth = 4;  //  // глубина буфера 4 = 1 секунда, 8 = 2 секунды... MAX 250, увеличение кушает память.
+        static float ed[buff_depth]; // массив предыдущих измерений ошибки (виден только внутри функции пид)  
+        e2 = (ust - temp); //ошибка регулирования Сглаживание на 4 шага
+        p2 =  (kP * e2) / 10; //П составляющая
+        integra2 = ((out > 99) && (e2*integra2>=0)) ? integra2 :  (integra2 < i_min) ? i_min : (integra2 > i_max) ? i_max : integra2 + (kI * e2)/10000.0; //И составляющая
+        d2 = kD * (temp - ed[buff_position])/10;
+        ed[buff_position] = temp;
+        buff_position = (buff_position < buff_depth-1) ? buff_position+1 : 0;
+        out = (p2 + integra2 - d2 >= 100 ) ? 100 : (p2 + integra2 - d2 <= 0 ) ? 0 : p2 + integra2 - d2; // Ограничиваем выходные значения
         return out;
  }
 
- 
 
  int8_t PidTEST4(double temp, int ust, byte kP, byte kI, byte kD) // Сглаживание дифференциальной составляющей на 4 шага 
  {
         int8_t out = 0;
         static byte lastOut; // предыдущее значение мощности
-        kP = 5;
-        kI = 15; // 
-        kD = 12; // реакция на изменение ошибки
-        byte kF = 40; // Значение множителя К для Сопротивления изменению температуры (f = friction)
+        byte kF = 30; // Значение множителя К для Сопротивления изменению температуры (f = friction)
         float f3 = 0; 
         static const byte buff_depth = 8; //  // глубина буфера 4 = 1 секунда, 8 = 2 секунды... MAX 250, увеличение кушает память.
         static float ed[buff_depth]; // массив предыдущих измерений ошибки (виден только внутри функции пид)  
@@ -1166,23 +1159,21 @@ byte PidTEST2(double temp, int ust, byte kP, byte kI, byte kd) // Сглажив
         Serial.println(integra3); // DIAGNOSTICS
         Serial.println(d3); // DIAGNOSTICS
         Serial.println(f3);
-        out = (p3 + integra3 + d3 - f3 > 100 ) ? 100 : (p3 + integra3 + d3 - f3  < -100 ) ? -100 : p3 + integra3 + d3 - f3;  // Ограничиваем выходные значения -100 __ 100
+        out = (p3 + integra3 + d3 - f3 > profile.max_correction_top+profile.max_correction_bottom ) ? profile.max_correction_top+profile.max_correction_bottom : (p3 + integra3 + d3 - f3  < -100 ) ? -100 : p3 + integra3 + d3 - f3;  // Ограничиваем выходные значения -100 __ 100
         lastOut = out;
         return out;
  }
 
  byte Pid1_ANTIWINDUP(double temp, int ust, byte kP, byte kI, byte kD) 
  {
-        byte out = 0;
-        static byte lastOut; // предыдущее значение мощности
+        static byte out;  // храним предыдущее значение мощности между рассчетами
         static float ed = 0;
         e1 = (ust - temp); //ошибка регулирования
         p1 =  (kP * e1); //П составляющая
-        integra1 = ((lastOut > 99) && (e1*integra1>=0)) ? integra1 : (integra1 < i_min) ? i_min : (integra1 > i_max) ? i_max : integra1 + (kI * e1)/1000.0; // если выход ПИД на максимуме, ошибка и integral одинакового знака (-*- = +, +*+ = +) то не считаем I, иначе смотрим на максимум
+        integra1 = ((out > 99) && (e1*integra1>=0)) ? integra1 : (integra1 < i_min) ? i_min : (integra1 > i_max) ? i_max : integra1 + (kI * e1)/1000.0; // если выход ПИД на максимуме, ошибка и integral одинакового знака (-*- = +, +*+ = +) то не считаем I, иначе смотрим на максимум
         d1 = kD * (temp - ed); //Д составляющая
         ed = temp;
         out = (p1 + integra1 - d1 >= 100 ) ? 100 : (p1 + integra1 - d1 <= 0 ) ? 0 : p1 + integra1 - d1;  //  Выход ПИД от 0 до 100.
-        lastOut = out;
         return out;
  }
 
@@ -1207,3 +1198,181 @@ double max6675_read_temp (int ck, int cs, int so)
    } else 
    return ((tmp>>3))*0.25;
  }
+
+
+
+void ParseParameters ()//парсер параметров Костыль))
+{
+  int jump_if_warm;
+  String st;
+  sprintf (buf, "TXRecive Params %03d\r\n",ttydata.length());
+  Serial.print(buf);
+
+  int n = sscanf(ttydata.c_str(), "%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d,%03d;",
+  &profile.time_step_top[0],
+  &profile.time_step_top[1],
+  &profile.time_step_top[2],
+  &profile.time_step_top[3],
+  &profile.time_step_top[4],
+  &profile.time_step_top[5],
+  &profile.time_step_top[6],
+  &profile.time_step_top[7],
+  &profile.time_step_top[8],
+  &profile.time_step_top[9],
+  &profile.time_step_top[10],
+  &profile.time_step_top[11],
+  &profile.time_step_top[12],
+  &profile.time_step_top[13],
+  &profile.time_step_top[14],
+  &profile.time_step_top[15],
+  &profile.time_step_top[16],
+  &profile.time_step_top[17],
+  &profile.time_step_top[18],
+  &profile.time_step_top[19],
+  &profile.time_step_top[20],  
+  &profile.time_step_top[21],
+  &profile.time_step_top[22],
+  &profile.time_step_top[23],
+  &profile.time_step_top[24],
+  &profile.time_step_top[25],
+  &profile.time_step_top[26],
+  &profile.time_step_top[27],
+  &profile.time_step_top[28],
+  &profile.time_step_top[29],
+  &profile.temperature_step_top[0],
+  &profile.temperature_step_top[1],
+  &profile.temperature_step_top[2],
+  &profile.temperature_step_top[3],
+  &profile.temperature_step_top[4],
+  &profile.temperature_step_top[5],
+  &profile.temperature_step_top[6],
+  &profile.temperature_step_top[7],
+  &profile.temperature_step_top[8],
+  &profile.temperature_step_top[9],
+  &profile.temperature_step_top[10],
+  &profile.temperature_step_top[11],
+  &profile.temperature_step_top[12],
+  &profile.temperature_step_top[13],
+  &profile.temperature_step_top[14],
+  &profile.temperature_step_top[15],
+  &profile.temperature_step_top[16],
+  &profile.temperature_step_top[17],
+  &profile.temperature_step_top[18],
+  &profile.temperature_step_top[19],
+  &profile.temperature_step_top[20],  
+  &profile.temperature_step_top[21],
+  &profile.temperature_step_top[22],
+  &profile.temperature_step_top[23],
+  &profile.temperature_step_top[24],
+  &profile.temperature_step_top[25],
+  &profile.temperature_step_top[26],
+  &profile.temperature_step_top[27],
+  &profile.temperature_step_top[28],
+  &profile.temperature_step_top[29],
+  &profile.time_step_bottom[0],
+  &profile.time_step_bottom[1],
+  &profile.time_step_bottom[2],
+  &profile.time_step_bottom[3],
+  &profile.time_step_bottom[4],
+  &profile.time_step_bottom[5],
+  &profile.time_step_bottom[6],
+  &profile.time_step_bottom[7],
+  &profile.time_step_bottom[8],
+  &profile.time_step_bottom[9],
+  &profile.time_step_bottom[10],
+  &profile.time_step_bottom[11],
+  &profile.time_step_bottom[12],
+  &profile.time_step_bottom[13],
+  &profile.time_step_bottom[14],
+  &profile.time_step_bottom[15],
+  &profile.time_step_bottom[16],
+  &profile.time_step_bottom[17],
+  &profile.time_step_bottom[18],
+  &profile.time_step_bottom[19],
+  &profile.time_step_bottom[20],  
+  &profile.time_step_bottom[21],
+  &profile.time_step_bottom[22],
+  &profile.time_step_bottom[23],
+  &profile.time_step_bottom[24],
+  &profile.time_step_bottom[25],
+  &profile.time_step_bottom[26],
+  &profile.time_step_bottom[27],
+  &profile.time_step_bottom[28],
+  &profile.time_step_bottom[29],
+  &profile.temperature_step_bottom[0],
+  &profile.temperature_step_bottom[1],
+  &profile.temperature_step_bottom[2],
+  &profile.temperature_step_bottom[3],
+  &profile.temperature_step_bottom[4],
+  &profile.temperature_step_bottom[5],
+  &profile.temperature_step_bottom[6],
+  &profile.temperature_step_bottom[7],
+  &profile.temperature_step_bottom[8],
+  &profile.temperature_step_bottom[9],
+  &profile.temperature_step_bottom[10],
+  &profile.temperature_step_bottom[11],
+  &profile.temperature_step_bottom[12],
+  &profile.temperature_step_bottom[13],
+  &profile.temperature_step_bottom[14],
+  &profile.temperature_step_bottom[15],
+  &profile.temperature_step_bottom[16],
+  &profile.temperature_step_bottom[17],
+  &profile.temperature_step_bottom[18],
+  &profile.temperature_step_bottom[19],
+  &profile.temperature_step_bottom[20],  
+  &profile.temperature_step_bottom[21],
+  &profile.temperature_step_bottom[22],
+  &profile.temperature_step_bottom[23],
+  &profile.temperature_step_bottom[24],
+  &profile.temperature_step_bottom[25],
+  &profile.temperature_step_bottom[26],
+  &profile.temperature_step_bottom[27],
+  &profile.temperature_step_bottom[28],
+  &profile.temperature_step_bottom[29],
+  &profile.time_step_pcb[0],
+  &profile.time_step_pcb[1],
+  &profile.time_step_pcb[2],
+  &profile.time_step_pcb[3],
+  &profile.time_step_pcb[4],
+  &profile.time_step_pcb[5],
+  &profile.time_step_pcb[6],
+  &profile.time_step_pcb[7],
+  &profile.time_step_pcb[8],
+  &profile.time_step_pcb[9],
+  &profile.temperature_step_pcb[0],
+  &profile.temperature_step_pcb[1],
+  &profile.temperature_step_pcb[2],
+  &profile.temperature_step_pcb[3],
+  &profile.temperature_step_pcb[4],
+  &profile.temperature_step_pcb[5],
+  &profile.temperature_step_pcb[6],
+  &profile.temperature_step_pcb[7],
+  &profile.temperature_step_pcb[8],
+  &profile.temperature_step_pcb[9],
+  &profile.profile_steps,
+  &profile.table_size,
+  &profile.kp1, 
+  &profile.ki1, 
+  &profile.kd1, 
+  &profile.kp2, 
+  &profile.ki2, 
+  &profile.kd2, 
+  &profile.kp3, 
+  &profile.ki3, 
+  &profile.kd3,
+  &profile.max_correction_top,      
+  &profile.max_correction_bottom,  
+  &profile.max_pcb_delta,        
+  &profile.hold_lenght,           
+  &profile.participation_rate_top,
+  &jump_if_warm);
+  profile.jump_if_pcb_warm = (bool)jump_if_warm;
+  Serial.print(F("n="));
+  Serial.println(n);
+
+  ttydata=""; 
+
+  SaveProfile();
+
+ return;
+}
