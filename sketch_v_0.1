@@ -1358,6 +1358,8 @@ void ParseParameters ()//парсер параметров Костыль))
   &profile.hold_lenght,           
   &profile.participation_rate_top,
   &jump_if_warm); 
+  profile.jump_if_pcb_warm = (bool)jump_if_warm;
+  
   Serial.print(F("ProfileParsed"));
   Serial.print(F("n="));
   Serial.println(n);
