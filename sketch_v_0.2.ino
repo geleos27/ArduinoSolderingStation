@@ -2158,16 +2158,16 @@ void SAVE (int arg_cnt, char **args)
   if (arg_cnt != 2) s->print("Please enter profile number to save!");
   else
   {
-    currentProfile = atoi(args[1]);
-    if (currentProfile <= 0 || currentProfile > max_profiles)
+    if (atoi(args[1]) <= 0 || atoi(args[1]) > max_profiles)
     {
       s->print("Profile number over limit!");
     }
     else {
+      currentProfile = atoi(args[1]);
       SaveProfile();
-       s->print("Profile ");
-       s->print(currentProfile);
-       s->println("  updated");
+      s->print("Profile ");
+      s->print(currentProfile);
+      s->println("  updated");
     }
   }
 }
